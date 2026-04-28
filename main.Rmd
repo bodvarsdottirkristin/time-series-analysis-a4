@@ -52,4 +52,252 @@ ggplot(data_long, aes(x = t, y = value, color = variable)) +
 
 dev.off()
 ```
+2.2 Estimate a 1-dimensional state-space model
+
+```{r}
+kf_logLik_dt <- function(par, df) {
+  # par: vector of parameters
+  # df: data frame with observations and inputs as columns (Y, Ta, S, I)
+  # par: Could be on the form c(A11, A12, A21, A22, B11, B12, B21, B22, Q11, Q12, Q22)
+  A   <- matrix(par[1], 1, 1) # transition matrix
+  B   <- matrix(c(par[2], par[3], par[4]), 1, 3) # input matrix
+  Qlt <- matrix(par[5], 1, 1)  # lower-triangle of system covariance matrix
+  Q   <- Qlt %*% t(Qlt) # THAT IS!!! The system covariance matrix is given by Qlt %*% t(Qlt) (and is this symmetric positive definite)
+  H   <- matrix(par[6], 1, 1)     # observation matrix
+  X0  <- matrix(par[7], 1, 1)     # initial state
+  R_obs <- matrix(exp(par[8])^2, 1, 1) # observation noise covariance matrix
+  obs_cols <- c("Y") # observation column names
+  input_cols <- c("Ta","S","I") # input column names
+
+  # pull out data
+  Y  <- as.matrix(df[, obs_cols])     # m×T
+  U  <- as.matrix(df[, input_cols])   # p×T
+  Tn <- nrow(df)
+
+  # init
+  n      <- nrow(A)
+  x_est  <- matrix(Y[1,], n, 1)            # start state from first obs
+  x_est <- X0 
+  P_est  <- diag(1e1, n)                   # X0 prior covariance
+  logLik <- 0
+
+  for (t in 1:Tn) {
+    # prediction step
+    u_t <- matrix(U[t, ], 3, 1)   # 3 x 1 input vector at time t
+    
+    x_pred <- A %*% x_est + B %*% u_t
+    P_pred <- A %*% P_est %*% t(A) + Q
+
+    # innovation step
+    y_pred  <- H %*% x_pred 
+    S_t     <- H %*% P_pred %*% t(H) + R_obs
+    innov   <- matrix(Y[t, ], 1, 1) - y_pred
+
+    # log-likelihood contribution
+    logLik <- logLik - 0.5*(sum(log(2*pi*S_t)) + t(innov) %*% solve(S_t, innov))
+
+    # update step
+    K_t    <- P_pred %*% t(H) %*% solve(S_t)
+    x_est  <- x_pred + K_t %*% innov
+    P_est  <- (diag(n) - K_t %*% H) %*% P_pred
+  }
+
+  as.numeric(logLik)
+}
+
+# Optimizer wrapper
+estimate_dt <- function(start_par, df, lower=NULL, upper=NULL) {
+  negLL <- function(par) -kf_logLik_dt(par, df)
+  optim(
+    par    = start_par, fn = negLL,
+    method = "L-BFGS-B",
+    lower  = lower, upper = upper,
+    control= list(maxit=1000, trace=1)
+  )
+}
+
+```
+
+
+```{r}
+# ----------------------------------------------------------
+# 3. Kalman smoother — returns filtered states & one-step-ahead residuals
+# ----------------------------------------------------------
+kf_filter <- function(par, df) {
+  A_val     <- par[1]; B1 <- par[2]; B2 <- par[3]; B3 <- par[4]
+  G_val     <- par[5]; C_val <- par[6]; log_sig_y <- par[7]
+ 
+  A <- matrix(A_val, 1, 1)
+  B <- matrix(c(B1, B2, B3), 1, 3)
+  G <- matrix(G_val, 1, 1)
+  C <- matrix(C_val, 1, 1)
+  Q <- G %*% t(G)
+  R <- matrix(exp(log_sig_y)^2, 1, 1)
+ 
+  Y  <- as.matrix(df[, "Y",            drop = FALSE])
+  U  <- as.matrix(df[, c("Ta","S","I"), drop = FALSE])
+  Tn <- nrow(df)
+ 
+  x_filt <- numeric(Tn)
+  resids  <- numeric(Tn)
+ 
+  x_est <- matrix(Y[1, ], 1, 1)
+  P_est <- matrix(1e2,    1, 1)
+ 
+  for (t in 1:Tn) {
+    u_t    <- matrix(U[t, ], 3, 1)
+    x_pred <- A %*% x_est + B %*% u_t
+    P_pred <- A %*% P_est %*% t(A) + Q
+    y_pred <- C %*% x_pred
+    S_t    <- C %*% P_pred %*% t(C) + R
+    innov  <- matrix(Y[t, ], 1, 1) - y_pred
+    K_t    <- P_pred %*% t(C) %*% solve(S_t)
+    x_est  <- x_pred + K_t %*% innov
+    P_est  <- (diag(1) - K_t %*% C) %*% P_pred
+ 
+    x_filt[t] <- as.numeric(x_est)
+    resids[t]  <- as.numeric(innov)
+  }
+  list(x_filt = x_filt, residuals = resids)
+}
+```
+
+
+```{r}
+# ----------------------------------------------------------
+# 4. Fit the model
+# ----------------------------------------------------------
+ 
+# Load your data — adjust path / column names as needed
+# Expected columns: time (or index), Y, Ta, S, I
+# df <- read.csv("your_data.csv")
+ 
+# --- Example with synthetic data if real data not yet loaded ---
+set.seed(42)
+Tn  <- 500
+Ta  <- 10 + 5 * sin(seq(0, 4 * pi, length.out = Tn))
+S   <- pmax(0, 20 * sin(seq(0, 2 * pi, length.out = Tn)))
+I   <- rep(c(1, 0), each = Tn / 2) * 5
+X   <- numeric(Tn); X[1] <- 20
+for (t in 2:Tn) X[t] <- 0.95 * X[t-1] + 0.03 * Ta[t-1] + 0.01 * S[t-1] + 0.02 * I[t-1] + rnorm(1, 0, 0.3)
+Y   <- X + rnorm(Tn, 0, 0.5)
+df  <- data.frame(Y = Y, Ta = Ta, S = S, I = I)
+# --- End synthetic data block ---
+ 
+# Initial parameter guess
+# par = c(A, B1_Ta, B2_solar, B3_load, Qlt, H, X0, log_R_obs)
+start_par <- c(
+  A         =  0.90,
+  B1_Ta     =  0.05,
+  B2_solar  =  0.01,
+  B3_load   =  0.02,
+  Qlt       =  0.50,
+  H         =  1.00,
+  X0        =  df$Y[1],  # initial state = first observation
+  log_R_obs =  log(0.5)
+)
+ 
+lower_bounds <- c(A=0.50, B1_Ta=-0.20, B2_solar=0.00, B3_load=0.00,
+                  Qlt=1e-4, H=0.80, X0=-Inf, log_R_obs=-4.0)
+upper_bounds <- c(A=0.999, B1_Ta=0.50, B2_solar=0.20, B3_load=0.20,
+                  Qlt=5.0,  H=1.20, X0=Inf,  log_R_obs=2.0)
+
+ 
+cat("Fitting state-space model...\n")
+fit <- estimate_dt(start_par, df, lower = lower_bounds, upper = upper_bounds)
+ 
+cat("\n=== Estimated Parameters ===\n")
+pnames <- c("A", "B_Ta", "B_solar", "B_load", "G", "C", "log_sigma_y")
+est    <- setNames(fit$par, pnames)
+print(round(est, 4))
+cat("sigma_y =", round(exp(est["log_sigma_y"]), 4), "\n")
+cat("Q (system noise var) =", round(est["G"]^2, 4), "\n")
+```
+
+
+```{r}
+# ----------------------------------------------------------
+# 5. Information criteria
+# ----------------------------------------------------------
+logLik_val <- -fit$value
+k          <- length(fit$par)
+n          <- nrow(df)
+AIC_val    <- -2 * logLik_val + 2 * k
+BIC_val    <- -2 * logLik_val + log(n) * k
+ 
+cat("\n=== Model Performance ===\n")
+cat(sprintf("Log-likelihood : %.2f\n", logLik_val))
+cat(sprintf("AIC            : %.2f\n", AIC_val))
+cat(sprintf("BIC            : %.2f\n", BIC_val))
+cat(sprintf("Convergence    : %d (0 = success)\n", fit$convergence))
+```
+
+
+```{r}
+# ----------------------------------------------------------
+# 6. Diagnostic plots
+# ----------------------------------------------------------
+res  <- kf_filter(fit$par, df)
+resids <- res$residuals
+x_hat  <- res$x_filt
+ 
+# Standardised residuals
+sigma_y <- exp(est["log_sigma_y"])
+std_resids <- resids / sigma_y
+ 
+time_index <- seq_len(nrow(df))
+ 
+png("figures/2_2.png", width = 1000, height = 500)
+
+par(mfrow = c(2, 3), mar = c(4, 4, 3, 1))
+ 
+
+# Plot 1: Observed vs fitted
+plot(time_index, df$Y, type = "l", col = "steelblue", lwd = 1.2,
+     xlab = "Time", ylab = "Temperature", main = "Observed vs Filtered")
+lines(time_index, x_hat, col = "firebrick", lwd = 1.5, lty = 2)
+legend("topright", legend = c("Observed Y", "Filtered X"),
+       col = c("steelblue","firebrick"), lty = c(1,2), bty = "n")
+ 
+# Plot 2: Residuals over time
+plot(time_index, std_resids, type = "l", col = "darkgray",
+     xlab = "Time", ylab = "Standardised residual",
+     main = "One-step-ahead residuals")
+abline(h = c(-2, 0, 2), lty = c(2, 1, 2), col = c("red","black","red"))
+ 
+# Plot 3: ACF of residuals
+acf(std_resids, main = "ACF of residuals", lag.max = 40)
+ 
+# Plot 4: PACF of residuals
+pacf(std_resids, main = "PACF of residuals", lag.max = 40)
+ 
+# Plot 5: QQ-plot
+qqnorm(std_resids, main = "QQ-plot of residuals")
+qqline(std_resids, col = "red", lwd = 2)
+ 
+# Plot 6: Residuals vs fitted (heteroscedasticity check)
+plot(x_hat, std_resids, pch = 20, col = adjustcolor("steelblue", 0.4),
+     xlab = "Filtered state", ylab = "Std. residual",
+     main = "Residuals vs Fitted")
+abline(h = 0, col = "red")
+ 
+par(mfrow = c(1, 1))
+dev.off()
+```
+
+
+```{r}
+# ----------------------------------------------------------
+# 7. Summary table for the report
+# ----------------------------------------------------------
+cat("\n=== Parameter Interpretation ===\n")
+cat(sprintf("A = %.4f  : Fraction of heat retained each time step (thermal inertia)\n", est["A"]))
+cat(sprintf("           Half-life ≈ %.1f steps\n", -log(2)/log(est["A"])))
+cat(sprintf("B_Ta    = %.4f : Temperature rise per 1 unit of outdoor temp\n", est["B_Ta"]))
+cat(sprintf("B_solar = %.4f : Temperature rise per 1 W/m² of solar radiation\n", est["B_solar"]))
+cat(sprintf("B_load  = %.4f : Temperature rise per 1 unit of internal load\n", est["B_load"]))
+cat(sprintf("G       = %.4f : System noise std (model uncertainty)\n", est["G"]))
+cat(sprintf("C       = %.4f : Observation gain (≈1 means direct temp measurement)\n", est["C"]))
+cat(sprintf("sigma_y = %.4f : Measurement noise std\n", sigma_y))
+```
 
