@@ -192,6 +192,75 @@ myKalmanFilter <- function(
 ```
 
 
+```{r}
+# --- 1. Run the Kalman Filter ---
+# use the data generated from step 1.2. 
+# We drop t=0 (index 1) to match the filter's expectation of observations starting at t=1
+Y_obs <- Y[2:(n+1)]
+X_true <- X[2:(n+1)]
+time_obs <- 1:n
+
+# Define parameters based on 1.1/1.2
+theta <- c(0.9, 1, 1) # a, b, sigma1
+R_var <- 1^2          # Measurement noise variance (sigma2^2)
+
+# Run the filter (using X0 = 5 , and  moderate prior variance)
+kf_res <- myKalmanFilter(y = Y_obs, theta = theta, R = R_var, 
+                         x_prior = X0, P_prior = 1)
+
+# --- 2. Calculate the 95% Confidence Interval ---
+# CI for the predicted state: \hat{X}_{t|t-1} +/- 1.96 * sqrt(P_{t|t-1})
+ci_upper <- kf_res$x_pred + 1.96 * sqrt(kf_res$P_pred)
+ci_lower <- kf_res$x_pred - 1.96 * sqrt(kf_res$P_pred)
+
+# --- 3. Plotting ---
+filename_1_3 <- "figures/1_3_kalman_filter.pdf"
+cols <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00")
+
+pdf(filename_1_3, width = 9, height = 5)
+par(mar = c(5,5,3,2))
+
+# Plot True State First (Solid Blue)
+plot(time_obs, X_true,
+     type = "l", lty = 1, lwd = 1.5, col = adjustcolor(cols[2], 0.8), 
+     xlab = "Time (t)", ylab = "Value",
+     ylim = range(c(Y_obs, ci_upper, ci_lower)),
+     main = "Kalman Filter: True vs. Predicted State"
+)
+
+# Add Shaded 95% Confidence Interval Polygon (Transparent Purple)
+polygon(c(time_obs, rev(time_obs)), 
+        c(ci_lower, rev(ci_upper)), 
+        col = adjustcolor(cols[4], 0.2), 
+        border = NA)
+
+# Add Predicted State Line (Dashed Purple)
+lines(time_obs, kf_res$x_pred, 
+      lty = 2, lwd = 2, col = cols[4]) 
+
+# Add Noisy Observations (Red Dots)
+points(time_obs, Y_obs, 
+       pch = 16, cex = 0.8, col = adjustcolor(cols[1], 0.5)) 
+
+# Legend
+legend("bottomright", 
+       legend = c(expression(paste("True Latent State (", X[t], ")")), 
+                  expression(paste("Noisy Observations (", Y[t], ")")),
+                  expression(paste("Predicted State (", X[t~"+"~1~"|"~t], ")")),
+                  "95% CI (Predicted)"),
+       col = c(adjustcolor(cols[2], 0.8), 
+               adjustcolor(cols[1], 0.5), 
+               cols[4], 
+               adjustcolor(cols[4], 0.3)),
+       lwd = c(1.5, NA, 2, 8),
+       pch = c(NA, 16, NA, NA),
+       lty = c(1, NA, 2, 1),
+       bty = "n", cex = 0.85)
+
+dev.off()
+
+message("Plot successfully saved to: ", filename_1_3)
+```
 
 
 Part 2
