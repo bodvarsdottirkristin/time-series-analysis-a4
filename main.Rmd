@@ -110,7 +110,7 @@ plot(time_steps, X,
      col = adjustcolor(cols[2], 0.9), # Blue line for the true state
      xlab = "Time (t)",
      ylab = "Value",
-     ylim = range(c(X, Y)), # Ensure the y-axis scales to fit both X and Y
+     ylim = range(0,16), # Ensure the y-axis scales to fit both X and Y
 )
 
 # Plot noisy obs using points
@@ -174,6 +174,8 @@ myKalmanFilter <- function(
     # the update step
     innovation[t] <- y[t] - x_pred[t] # the prediction error
     innovation_var[t] <- P_pred[t] + R # the prediction error variance
+    
+    #reconstruction
     K_t <-  P_pred[t] * 1/innovation_var[t]  # the Kalman gain
     x_filt[t] <- x_pred[t] + K_t * innovation[t] # the filtered estimate
     P_filt[t] <- P_pred[t] - K_t^2 * innovation_var[t] # the filtered estimate variance
@@ -193,9 +195,10 @@ myKalmanFilter <- function(
 
 
 ```{r}
-# --- 1. Run the Kalman Filter ---
+set.seed(42)
+# --- 1. Run Kalman Filter ---
 # use the data generated from step 1.2. 
-# We drop t=0 (index 1) to match the filter's expectation of observations starting at t=1
+# We drop t=0 (index 1) to match the filter num of observations starting at t=1
 Y_obs <- Y[2:(n+1)]
 X_true <- X[2:(n+1)]
 time_obs <- 1:n
@@ -204,9 +207,9 @@ time_obs <- 1:n
 theta <- c(0.9, 1, 1) # a, b, sigma1
 R_var <- 1^2          # Measurement noise variance (sigma2^2)
 
-# Run the filter (using X0 = 5 , and  moderate prior variance)
+# Run the filter (using X0 = 5 , and prior variance)
 kf_res <- myKalmanFilter(y = Y_obs, theta = theta, R = R_var, 
-                         x_prior = X0, P_prior = 1)
+                         x_prior = X0, P_prior = 10)
 
 # --- 2. Calculate the 95% Confidence Interval ---
 # CI for the predicted state: \hat{X}_{t|t-1} +/- 1.96 * sqrt(P_{t|t-1})
@@ -224,8 +227,8 @@ par(mar = c(5,5,3,2))
 plot(time_obs, X_true,
      type = "l", lty = 1, lwd = 1.5, col = adjustcolor(cols[2], 0.8), 
      xlab = "Time (t)", ylab = "Value",
-     ylim = range(c(Y_obs, ci_upper, ci_lower)),
-     main = "Kalman Filter: True vs. Predicted State"
+     ylim = range(0,16),
+     #main = "Kalman Filter: True vs. Predicted State"
 )
 
 # Add Shaded 95% Confidence Interval Polygon (Transparent Purple)
@@ -234,13 +237,19 @@ polygon(c(time_obs, rev(time_obs)),
         col = adjustcolor(cols[4], 0.2), 
         border = NA)
 
-# Add Predicted State Line (Dashed Purple)
-lines(time_obs, kf_res$x_pred, 
-      lty = 2, lwd = 2, col = cols[4]) 
+# Add Predicted State Line (solid Purple)
+lines(time_obs, kf_res$x_pred,
+      type = "l", lty = 1, lwd = 1.5, col = adjustcolor(cols[4], 0.8)) 
 
-# Add Noisy Observations (Red Dots)
-points(time_obs, Y_obs, 
-       pch = 16, cex = 0.8, col = adjustcolor(cols[1], 0.5)) 
+
+# Plot noisy obs using points
+lines(time_obs, Y_obs,
+      type = "b",        # "b" for both points and lines
+      lty = 2,           # 2 for a dashed line
+      pch = 16,          # Solid dots
+      cex = 0.8,
+      col = adjustcolor(cols[1], 0.6) # Red color with transparency
+)
 
 # Legend
 legend("bottomright", 
@@ -260,7 +269,289 @@ legend("bottomright",
 dev.off()
 
 message("Plot successfully saved to: ", filename_1_3)
+
+# --- 4. Export Results to CSV ---
+# Bundle the time steps, true states, observations, and filter outputs into a data frame
+results_df <- data.frame(
+  Time = time_obs,
+  True_State = X_true,
+  Observation = Y_obs,
+  Predicted_State_Mean = kf_res$x_pred,
+  Predicted_State_Var = kf_res$P_pred,
+  CI_Lower_95 = ci_lower,
+  CI_Upper_95 = ci_upper,
+  Filtered_State_Mean = kf_res$x_filt,
+  Filtered_State_Var = kf_res$P_filt,
+  Innovation = kf_res$innovation,
+  Innovation_Var = kf_res$innovation_var
+)
+
+# Define the filename for the export
+csv_filename <- "figures/csv_outputs/results_1_3_kalman_filter.csv"
+
+# Write the data frame to a CSV file (row.names = FALSE keeps it clean)
+write.csv(results_df, file = csv_filename, row.names = FALSE)
+
+message("Data successfully exported to: ", csv_filename)
 ```
+1.4
+Given function(modified):
+```{r}
+myLogLikFun <- function(theta, y, R, x_prior = 0, P_prior = 10) {
+  a <- theta[1]
+  b <- theta[2]
+  sigma1 <- theta[3]
+  
+  kf_result <- myKalmanFilter(y = y, theta = theta, R = R, 
+                              x_prior = x_prior, P_prior = P_prior) # call the Kalman filter function
+  err <- kf_result$innovation       # Innovations
+  S <- kf_result$innovation_var   # Innovation covariances
+  
+# 3. Compute log-likelihood contributions from each time step
+  # dnorm calculates the Gaussian density. log = TRUE gives us the log-likelihood.
+  # Note: dnorm takes standard deviation ('sd'), so we must take the square root of the variance 'S'.
+  logL <- sum(dnorm(err, mean = 0, sd = sqrt(S), log = TRUE))
+  return(-logL)  # Return negative log-likelihood for minimization
+}
+
+```
+
+```{r}
+# ==========================================
+# 1. Helper Functions
+# ==========================================
+
+# Function to simulate one realization of the State-Space Model
+simulate_ssm <- function(n, a, b, sigma1, sigma2 = 1, X0 = 5) {
+  X <- numeric(n + 1)
+  Y <- numeric(n + 1)
+  
+  X[1] <- X0
+  Y[1] <- X[1] + rnorm(1, mean = 0, sd = sigma2)
+  
+  for (t in 2:(n + 1)) {
+    X[t] <- a * X[t - 1] + b + rnorm(1, mean = 0, sd = sigma1)
+    Y[t] <- X[t] + rnorm(1, mean = 0, sd = sigma2)
+  }
+  
+  # Return only the observations Y_1 to Y_n (dropping t=0)
+  return(Y[2:(n + 1)])
+}
+
+# Function to run the 100 estimations for a given set of true parameters
+run_experiment <- function(n_realizations, n_steps, true_theta) {
+  a_true <- true_theta[1]
+  b_true <- true_theta[2]
+  sigma1_true <- true_theta[3]
+  
+  # Matrix to store the estimated parameters
+  estimates <- matrix(NA, nrow = n_realizations, ncol = 3)
+  colnames(estimates) <- c("a", "b", "sigma1")
+  
+  for (i in 1:n_realizations) {
+    # 1. Simulate data
+    Y_sim <- simulate_ssm(n = n_steps, a = a_true, b = b_true, sigma1 = sigma1_true)
+    
+    # 2. Optimize
+    # Initial guess for the optimizer
+    init_theta <- c(0, 0, 0.5) 
+    
+    opt_res <- optim(
+      par = init_theta,
+      fn = myLogLikFun,
+      y = Y_sim,
+      R = 1,           # R = sigma2^2 = 1 (fixed based on prompt)
+      x_prior = 5,     # X0 = 5
+      P_prior = 10,
+      method = "L-BFGS-B",
+      lower = c(-100, -100, 0.001), # sigma1 must be > 0
+      upper = c(100, 100, 100)
+    )
+    
+    # Store the results
+    estimates[i, ] <- opt_res$par
+  }
+  
+  return(as.data.frame(estimates))
+}
+
+# ==========================================
+# 2. Run the 3 Scenarios
+# ==========================================
+set.seed(42)
+
+# Scenario 1: a = 0.9, b = 1, sigma1 = 1
+message("Running Scenario 1...")
+res_1 <- run_experiment(100, 100, true_theta = c(0.9, 1, 1))
+
+# Scenario 2: a = 0.9, b = 5, sigma1 = 1
+message("Running Scenario 2...")
+res_2 <- run_experiment(100, 100, true_theta = c(0.9, 5, 1))
+
+# Scenario 3: a = 0.9, b = 1, sigma1 = 5
+message("Running Scenario 3...")
+res_3 <- run_experiment(100, 100, true_theta = c(0.9, 1, 5))
+
+
+# ==========================================
+# 3. Plotting the Results
+# ==========================================
+filename_1_4 <- "figures/1_4_parameter_estimation.pdf"
+pdf(filename_1_4, width = 10, height = 8)
+
+# Set up a 3x3 grid for the plots (Rows = Parameters, Columns = Scenarios)
+par(mfrow = c(3, 3), mar = c(4, 4, 3, 1))
+
+# Helper function to draw boxplot and true value line
+plot_param <- function(data, param_name, true_val, title) {
+  boxplot(data[[param_name]], main = title, ylab = paste("Estimated", param_name), col = "lightblue")
+  abline(h = true_val, col = "red", lwd = 2, lty = 2) # True value dashed line
+}
+
+# --- Row 1: Parameter 'a' ---
+plot_param(res_1, "a", 0.9, "Scenario 1: a (True = 0.9)")
+plot_param(res_2, "a", 0.9, "Scenario 2: a (True = 0.9)")
+plot_param(res_3, "a", 0.9, "Scenario 3: a (True = 0.9)")
+
+# --- Row 2: Parameter 'b' ---
+plot_param(res_1, "b", 1, "Scenario 1: b (True = 1)")
+plot_param(res_2, "b", 5, "Scenario 2: b (True = 5)")
+plot_param(res_3, "b", 1, "Scenario 3: b (True = 1)")
+
+# --- Row 3: Parameter 'sigma1' ---
+plot_param(res_1, "sigma1", 1, "Scenario 1: sigma1 (True = 1)")
+plot_param(res_2, "sigma1", 1, "Scenario 2: sigma1 (True = 1)")
+plot_param(res_3, "sigma1", 5, "Scenario 3: sigma1 (True = 5)")
+
+dev.off()
+
+message("Plot successfully saved to: ", filename_1_4)
+
+# --- 4. Export Results to CSV ---
+# Add a scenario label to each result data frame so we know which is which
+res_1$Scenario <- "Scenario 1 (a=0.9, b=1, sig=1)"
+res_2$Scenario <- "Scenario 2 (a=0.9, b=5, sig=1)"
+res_3$Scenario <- "Scenario 3 (a=0.9, b=1, sig=5)"
+
+# Combine all 300 rows into one large data frame
+all_results <- rbind(res_1, res_2, res_3)
+
+# Define the filename for the export
+csv_filename_1_4 <- "figures/csv_outputs/results_1_4_parameter_estimation.csv"
+
+# Write the data frame to a CSV file
+write.csv(all_results, file = csv_filename_1_4, row.names = FALSE)
+
+message("Data successfully exported to: ", csv_filename_1_4)
+```
+
+1.5
+```{r}
+# ==========================================
+# 1. Helper Function for t-distribution noise
+# ==========================================
+
+# Function to simulate one realization of the State-Space Model with Student-t noise
+simulate_ssm_t <- function(n, a, b, sigma1, nu, sigma2 = 1, X0 = 5) {
+  X <- numeric(n + 1)
+  Y <- numeric(n + 1)
+  
+  X[1] <- X0
+  Y[1] <- X[1] + rnorm(1, mean = 0, sd = sigma2)
+  
+  for (t in 2:(n + 1)) {
+    # System noise is now scaled Student-t
+    lambda_t <- rt(1, df = nu)
+    X[t] <- a * X[t - 1] + b + sigma1 * lambda_t
+    
+    # Observation noise remains Gaussian
+    Y[t] <- X[t] + rnorm(1, mean = 0, sd = sigma2)
+  }
+  
+  # Return only the observations Y_1 to Y_n
+  return(Y[2:(n + 1)])
+}
+
+# ==========================================
+# 2. Simulate Data
+# ==========================================
+set.seed(42)
+
+n_steps <- 100
+n_realizations <- 100
+a_true <- 0.9
+b_true <- 1
+sigma1_true <- 1
+nu_values <- c(100, 5, 2, 1)
+
+# We will store the simulated datasets in a list so we can easily feed them 
+# to the optimizer in the next step.
+simulated_data_t <- list()
+
+for (nu in nu_values) {
+  # Create a matrix to hold 100 realizations for this specific nu
+  data_matrix <- matrix(NA, nrow = n_steps, ncol = n_realizations)
+  
+  for (i in 1:n_realizations) {
+    data_matrix[, i] <- simulate_ssm_t(n = n_steps, a = a_true, b = b_true, 
+                                       sigma1 = sigma1_true, nu = nu)
+  }
+  
+  # Store it in the list with a descriptive name
+  simulated_data_t[[paste0("nu_", nu)]] <- data_matrix
+}
+
+message("Successfully simulated 100 realizations for nu = 100, 5, 2, and 1.")
+
+# ==========================================
+# 3. Plotting Densities
+# ==========================================
+filename_1_5_densities <- "figures/1_5_t_densities.pdf"
+cols <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00")
+
+pdf(filename_1_5_densities, width = 8, height = 5)
+par(mar = c(5, 5, 3, 2))
+
+# Define an x-axis range that shows the tails well
+x_vals <- seq(-6, 6, length.out = 500)
+
+# Plot the Standard Normal as the baseline (Solid Red)
+plot(x_vals, dnorm(x_vals), type = "l", lwd = 3, col = cols[1],
+     xlab = "Value", ylab = "Density", 
+     #main = "Density of Student-t vs Standard Normal",
+     ylim = c(0, 0.45))
+
+# Add the t-distributions
+# nu = 100 
+lines(x_vals, dt(x_vals, df = 100), col = cols[2], lwd = 1, type = "l")
+
+# nu = 5
+lines(x_vals, dt(x_vals, df = 5), col = cols[3], lwd = 1, type="l")
+
+# nu = 2
+lines(x_vals, dt(x_vals, df = 2), col = cols[4], lwd = 1, type = "l")
+
+# nu = 1
+lines(x_vals, dt(x_vals, df = 1), col = cols[5], lwd = 1, type = "l")
+
+# Add Legend
+legend("topright", 
+       legend = c("Normal N(0,1)", 
+                  expression(paste("Student-t (", nu, " = 100)")),
+                  expression(paste("Student-t (", nu, " = 5)")),
+                  expression(paste("Student-t (", nu, " = 2)")),
+                  expression(paste("Student-t (", nu, " = 1)"))),
+       col = c(cols[1], cols[2], cols[3], cols[4], cols[5]),
+       lwd = c(3, 1, 1, 1, 1),
+       lty = c(1, 1, 1, 1, 1),
+       bty = "n")
+
+dev.off()
+
+message("Density plot successfully saved to: ", filename_1_5_densities)
+```
+
+
 
 
 Part 2
